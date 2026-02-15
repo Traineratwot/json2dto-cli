@@ -1,0 +1,52 @@
+{
+    "name": "traineratwot/json2dto",
+    "license": "GPL-3.0",
+    "description": "Convert JSON files to Spatie DTO objects",
+    "keywords": ["spatie", "laravel", "dto", "converter", "json"],
+    "homepage": "https://github.com/traineratwot/json2dto",
+    "type": "project",
+    "support": {
+        "source": "https://github.com/traineratwot/json2dto"
+    },
+    "authors": [
+        {
+            "name": "traineratwot",
+            "email": "traineratwot@yandex.ru",
+            "homepage": "https://github.com/traineratwot/json2dto"
+        }
+    ],
+    "require": {
+        "php": ">=8.2",
+        "ext-json": "*",
+        "illuminate/support": "~5.5 || ~6.0 || ~7.0 || ~8.0 || ~9.0",
+        "nette/php-generator": "^3.3",
+        "spatie/laravel-data": "^3.12",
+        "symfony/console": "^4.2 || ^5.0"
+    },
+    "require-dev": {
+        "mockery/mockery": "^1.0",
+        "phpunit/phpunit": "^9.5",
+        "spatie/phpunit-snapshot-assertions": "^4.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Traineratwot\\Json2Dto\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "optimize-autoloader": true
+    },
+    "scripts": {
+        "test:ci": "phpunit --verbose --coverage-clover=coverage.xml"
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "bin": ["json2dto"]
+}
