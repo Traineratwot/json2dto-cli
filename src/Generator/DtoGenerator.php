@@ -69,6 +69,46 @@ class DtoGenerator
         return $classNamespace;
     }
 
+    /**
+     * Нормализует ключ JSON в валидное имя PHP-переменной в camelCase.
+     *
+     * Убирает все символы, невалидные для PHP-переменных,
+     * затем приводит результат к camelCase.
+     *
+     * Примеры:
+     *   "@Name"       -> "name"
+     *   "@HowToReach" -> "howToReach"
+     *   "some-key"    -> "someKey"
+     *   "some_key"    -> "someKey"
+     *   "WorkPeriod"  -> "workPeriod"
+     *   "123bad"      -> "bad" (цифры в начале убираются)
+     */
+    private function normalizePropertyName(string $key): ?string
+    {
+        // Убираем все символы, невалидные для PHP-переменной (оставляем буквы, цифры, _, пробелы и дефисы для разбиения)
+        $cleaned = preg_replace('/[^a-zA-Z0-9_\s\-]/', ' ', $key);
+
+        // Приводим к camelCase через Str::camel (он обрабатывает пробелы, дефисы, подчёркивания)
+        $camel = Str::camel(trim($cleaned));
+
+        // Убираем цифры в начале (невалидно для PHP)
+        $camel = ltrim($camel, '0123456789');
+
+        if ($camel === '') {
+            return null;
+        }
+
+        return $camel;
+    }
+
+    /**
+     * Проверяет, нужно ли маппить ключ (оригинальный ключ отличается от нормализованного).
+     */
+    private function needsMapping(string $originalKey, string $normalizedKey): bool
+    {
+        return $originalKey !== $normalizedKey;
+    }
+
     private function addConstructorProperty(
         PhpNamespace $namespace,
         ClassType $class,
@@ -78,12 +118,18 @@ class DtoGenerator
     ): void {
         $type = $this->getType($value);
 
-        if (!NameValidator::validateVariableName($key)) {
+        // Нормализуем имя свойства
+        $normalizedKey = $this->normalizePropertyName($key);
+
+        if ($normalizedKey === null) {
+            // Невозможно создать валидное имя переменной
             return;
         }
 
+        $shouldMap = $this->needsMapping($key, $normalizedKey);
+
         if ($type === 'array') {
-            $result = $this->addCollectionConstructorProperty($namespace, $class, $constructor, $key, $value);
+            $result = $this->addCollectionConstructorProperty($namespace, $class, $constructor, $key, $normalizedKey, $value, $shouldMap);
 
             if ($result) {
                 return;
@@ -95,14 +141,19 @@ class DtoGenerator
 
         if ($type === 'object') {
             $type = null;
-            if ($this->nested && NameValidator::validateClassName($key)) {
-                $dto = $this->addNestedDTO($namespace, $key, $value);
+            if ($this->nested && NameValidator::validateClassName($normalizedKey)) {
+                $dto = $this->addNestedDTO($namespace, $normalizedKey, $value);
                 $type = $this->getDtoFqcn($dto);
             }
         }
 
-        $param = $constructor->addPromotedParameter($key);
+        $param = $constructor->addPromotedParameter($normalizedKey);
         $param->setVisibility('public');
+
+        // Добавляем MapInputName/MapOutputName если оригинальный ключ отличается
+        if ($shouldMap) {
+            $this->addMappingAttributes($namespace, $param, $key);
+        }
 
         $phpType = $this->resolvePhpType($type);
         $docType = $type ?? 'mixed';
@@ -124,15 +175,17 @@ class DtoGenerator
         }
 
         // PHPDoc всегда пишем для IDE
-        $constructor->addComment(sprintf('@param %s $%s', $docType, $key));
+        $constructor->addComment(sprintf('@param %s $%s', $docType, $normalizedKey));
     }
 
     public function addCollectionConstructorProperty(
         PhpNamespace $namespace,
         ClassType $class,
         Method $constructor,
-        string $key,
+        string $originalKey,
+        string $normalizedKey,
         array $values,
+        bool $shouldMap,
     ): bool {
         $types = collect($values)->map($this->getType(...));
 
@@ -146,8 +199,12 @@ class DtoGenerator
 
         // Скалярные массивы
         if ($type !== 'object') {
-            $param = $constructor->addPromotedParameter($key);
+            $param = $constructor->addPromotedParameter($normalizedKey);
             $param->setVisibility('public');
+
+            if ($shouldMap) {
+                $this->addMappingAttributes($namespace, $param, $originalKey);
+            }
 
             if ($this->typed) {
                 $param->setType('array');
@@ -155,7 +212,7 @@ class DtoGenerator
             }
 
             // PHPDoc для IDE — указываем тип элементов
-            $constructor->addComment(sprintf('@param %s[]|null $%s', $type, $key));
+            $constructor->addComment(sprintf('@param %s[]|null $%s', $type, $normalizedKey));
 
             return true;
         }
@@ -169,15 +226,19 @@ class DtoGenerator
             return false;
         }
 
-        if (!NameValidator::validateClassName($key)) {
+        if (!NameValidator::validateClassName($normalizedKey)) {
             return false;
         }
 
-        $dto = $this->addNestedDTO($namespace, $key, reset($values));
+        $dto = $this->addNestedDTO($namespace, $normalizedKey, reset($values));
         $dtoFqcn = $this->getDtoFqcn($dto);
 
-        $param = $constructor->addPromotedParameter($key);
+        $param = $constructor->addPromotedParameter($normalizedKey);
         $param->setVisibility('public');
+
+        if ($shouldMap) {
+            $this->addMappingAttributes($namespace, $param, $originalKey);
+        }
 
         if ($this->typed) {
             $param->setType('array');
@@ -188,7 +249,7 @@ class DtoGenerator
         $namespace->addUse('Spatie\\LaravelData\\Attributes\\DataCollectionOf');
         $param->addAttribute('Spatie\\LaravelData\\Attributes\\DataCollectionOf', [$dtoFqcn]);
 
-        $constructor->addComment(sprintf('@param %s[]|null $%s', $dtoFqcn, $key));
+        $constructor->addComment(sprintf('@param %s[]|null $%s', $dtoFqcn, $normalizedKey));
 
         return true;
     }
@@ -249,6 +310,25 @@ class DtoGenerator
         }
 
         return 'mixed';
+    }
+
+    /**
+     * Добавляет атрибуты MapInputName и MapOutputName для маппинга
+     * оригинального ключа JSON на нормализованное имя PHP-свойства.
+     */
+    private function addMappingAttributes(
+        PhpNamespace $namespace,
+        PromotedParameter $param,
+        string $originalKey,
+    ): void {
+        $mapInputClass = 'Spatie\\LaravelData\\Attributes\\MapInputName';
+        $mapOutputClass = 'Spatie\\LaravelData\\Attributes\\MapOutputName';
+
+        $namespace->addUse($mapInputClass);
+        $namespace->addUse($mapOutputClass);
+
+        $param->addAttribute($mapInputClass, [$originalKey]);
+        $param->addAttribute($mapOutputClass, [$originalKey]);
     }
 
     /**
