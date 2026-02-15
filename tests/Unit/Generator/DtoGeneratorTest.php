@@ -16,7 +16,7 @@ class DtoGeneratorTest extends TestCase
 
     public function testGeneratesNonNestedDocblockDto()
     {
-        $generator = new DtoGenerator('App\DTO', false, false, false, false);
+        $generator = new DtoGenerator('App\DTO', false, false, false);
 
         $generator->generate($this->arrayToStdClass([
             'string' => 'string',
@@ -43,7 +43,7 @@ class DtoGeneratorTest extends TestCase
 
     public function testGeneratesNestedDocblockDto()
     {
-        $generator = new DtoGenerator('App\DTO', true, false, false, false);
+        $generator = new DtoGenerator('App\DTO', true, false, false);
 
         $generator->generate($this->arrayToStdClass([
             'string' => 'string',
@@ -82,7 +82,7 @@ class DtoGeneratorTest extends TestCase
 
     public function testGeneratesNestedTypedDto()
     {
-        $generator = new DtoGenerator('App\DTO', true, true, false, false);
+        $generator = new DtoGenerator('App\DTO', true, true, false);
 
         $generator->generate($this->arrayToStdClass([
             'string' => 'string',
@@ -115,9 +115,9 @@ class DtoGeneratorTest extends TestCase
         $this->assertMatchesJsonSnapshot($files);
     }
 
-    public function testGeneratesV3Dto()
+    public function testGeneratesOptional()
     {
-        $generator = new DtoGenerator('App\DTO', false, true, false, true);
+        $generator = new DtoGenerator('App\DTO', false, true, true);
 
         $generator->generate($this->arrayToStdClass([
             'string' => 'string',

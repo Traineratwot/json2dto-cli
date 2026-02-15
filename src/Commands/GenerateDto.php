@@ -4,14 +4,14 @@ declare(strict_types=1);
 
 namespace Traineratwot\Json2Dto\Commands;
 
-use Traineratwot\Json2Dto\Generator\DtoGenerator;
-use Traineratwot\Json2Dto\Helpers\NamespaceFolderResolver;
-use Traineratwot\Json2Dto\Helpers\NameValidator;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
+use Traineratwot\Json2Dto\Generator\DtoGenerator;
+use Traineratwot\Json2Dto\Helpers\NamespaceFolderResolver;
+use Traineratwot\Json2Dto\Helpers\NameValidator;
 
 class GenerateDto extends Command
 {
@@ -28,7 +28,7 @@ class GenerateDto extends Command
             ->addOption('classname', 'name', InputOption::VALUE_OPTIONAL, 'Class name of the new DTO', 'NewDto')
             ->addOption('nested', null, InputOption::VALUE_NONE, 'Generate nested DTOs')
             ->addOption('typed', null, InputOption::VALUE_NONE, 'Generate PHP >= 7.4 strict typing')
-            ->addOption('flexible', null, InputOption::VALUE_NONE, 'Generate a flexible DTO')
+            ->addOption('optional', null, InputOption::VALUE_NONE, 'Make all fields optional (nullable with default null)')
             ->addOption('dry', null, InputOption::VALUE_NONE, 'Dry run, print generated files');
     }
 
@@ -62,10 +62,10 @@ class GenerateDto extends Command
         $dryRun = $input->getOption('dry') !== false;
 
         $generator = new DtoGenerator(
-            $input->getArgument('namespace'),
-            $input->getOption('nested') !== false,
-            $input->getOption('typed') !== false,
-            $input->getOption('flexible') !== false,
+            baseNamespace: $input->getArgument('namespace'),
+            nested: $input->getOption('nested') !== false,
+            typed: $input->getOption('typed') !== false,
+            optional: $input->getOption('optional') !== false,
         );
 
         $generator->generate($decoded, $input->getOption('classname'));

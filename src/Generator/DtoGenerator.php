@@ -21,7 +21,7 @@ class DtoGenerator
         private readonly string $baseNamespace,
         private readonly bool $nested,
         private readonly bool $typed,
-        private readonly bool $flexible,
+        private readonly bool $optional,
     ) {}
 
     public function generate(stdClass $source, ?string $name): void
@@ -160,6 +160,11 @@ class DtoGenerator
 
         if ($this->typed) {
             $param->setType($phpType);
+
+            if ($this->optional) {
+                $param->setNullable(true);
+                $param->setDefaultValue(null);
+            }
         }
 
         // Для примитивов PHP сам валидирует через type hints — атрибуты не нужны.
@@ -175,7 +180,11 @@ class DtoGenerator
         }
 
         // PHPDoc всегда пишем для IDE
-        $constructor->addComment(sprintf('@param %s $%s', $docType, $normalizedKey));
+        if ($this->optional) {
+            $constructor->addComment(sprintf('@param %s|null $%s', $docType, $normalizedKey));
+        } else {
+            $constructor->addComment(sprintf('@param %s $%s', $docType, $normalizedKey));
+        }
     }
 
     public function addCollectionConstructorProperty(
@@ -209,6 +218,10 @@ class DtoGenerator
             if ($this->typed) {
                 $param->setType('array');
                 $param->setNullable(true);
+
+                if ($this->optional) {
+                    $param->setDefaultValue(null);
+                }
             }
 
             // PHPDoc для IDE — указываем тип элементов
@@ -243,6 +256,10 @@ class DtoGenerator
         if ($this->typed) {
             $param->setType('array');
             $param->setNullable(true);
+
+            if ($this->optional) {
+                $param->setDefaultValue(null);
+            }
         }
 
         // DataCollectionOf нужен, потому что PHP не может типизировать "массив конкретных DTO"
@@ -342,7 +359,7 @@ class DtoGenerator
     ): void {
         $validationNs = 'Spatie\\LaravelData\\Attributes\\Validation';
 
-        if ($value === null) {
+        if ($value === null || $this->optional) {
             $this->addAttribute($namespace, $param, $validationNs . '\\Nullable');
         } else {
             $this->addAttribute($namespace, $param, $validationNs . '\\Required');
