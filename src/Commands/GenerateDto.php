@@ -29,8 +29,7 @@ class GenerateDto extends Command
             ->addOption('nested', null, InputOption::VALUE_NONE, 'Generate nested DTOs')
             ->addOption('typed', null, InputOption::VALUE_NONE, 'Generate PHP >= 7.4 strict typing')
             ->addOption('flexible', null, InputOption::VALUE_NONE, 'Generate a flexible DTO')
-            ->addOption('dry', null, InputOption::VALUE_NONE, 'Dry run, print generated files')
-            ->addOption('v3', null, InputOption::VALUE_NONE, 'Generate V3 DTO');
+            ->addOption('dry', null, InputOption::VALUE_NONE, 'Dry run, print generated files');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output)
@@ -65,9 +64,8 @@ class GenerateDto extends Command
         $generator = new DtoGenerator(
             $input->getArgument('namespace'),
             $input->getOption('nested') !== false,
-            $input->getOption('typed') !== false || $input->getOption('v3') !== false,
+            $input->getOption('typed') !== false,
             $input->getOption('flexible') !== false,
-            $input->getOption('v3') !== false
         );
 
         $generator->generate($decoded, $input->getOption('classname'));
