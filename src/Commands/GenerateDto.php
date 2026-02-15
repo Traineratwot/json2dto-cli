@@ -12,12 +12,14 @@ use Symfony\Component\Console\Output\OutputInterface;
 use Traineratwot\Json2Dto\Generator\DtoGenerator;
 use Traineratwot\Json2Dto\Helpers\NamespaceFolderResolver;
 use Traineratwot\Json2Dto\Helpers\NameValidator;
+use stdClass;
 
 class GenerateDto extends Command
 {
     private const EXIT_SUCCESS = 0;
     private const EXIT_INVALID_JSON = 2;
     private const EXIT_INVALID_NAMESPACE = 3;
+    private const EXIT_INVALID_MULTIPART = 4;
 
     protected function configure()
     {
@@ -29,6 +31,7 @@ class GenerateDto extends Command
             ->addOption('nested', null, InputOption::VALUE_NONE, 'Generate nested DTOs')
             ->addOption('typed', null, InputOption::VALUE_NONE, 'Generate PHP >= 7.4 strict typing')
             ->addOption('optional', null, InputOption::VALUE_NONE, 'Make all fields optional (nullable with default null)')
+            ->addOption('multipart', null, InputOption::VALUE_NONE, 'Merge array of objects into a single DTO covering all variants')
             ->addOption('dry', null, InputOption::VALUE_NONE, 'Dry run, print generated files');
     }
 
@@ -59,6 +62,7 @@ class GenerateDto extends Command
             return self::EXIT_INVALID_NAMESPACE;
         }
 
+        $isMultipart = $input->getOption('multipart') !== false;
         $dryRun = $input->getOption('dry') !== false;
 
         $generator = new DtoGenerator(
@@ -66,9 +70,48 @@ class GenerateDto extends Command
             nested: $input->getOption('nested') !== false,
             typed: $input->getOption('typed') !== false,
             optional: $input->getOption('optional') !== false,
+            multipart: $isMultipart,
         );
 
-        $generator->generate($decoded, $input->getOption('classname'));
+        if ($isMultipart) {
+            // Валидация: входной JSON должен быть массивом объектов
+            if (!is_array($decoded)) {
+                $output->writeln('Multipart mode requires the input JSON to be an array of objects');
+
+                return self::EXIT_INVALID_MULTIPART;
+            }
+
+            if (empty($decoded)) {
+                $output->writeln('Multipart mode requires a non-empty array of objects');
+
+                return self::EXIT_INVALID_MULTIPART;
+            }
+
+            // Проверяем, что все элементы — объекты (stdClass)
+            $allObjects = true;
+            foreach ($decoded as $item) {
+                if (!($item instanceof stdClass)) {
+                    $allObjects = false;
+                    break;
+                }
+            }
+
+            if (!$allObjects) {
+                $output->writeln('Multipart mode requires all array elements to be objects, not primitive types');
+
+                return self::EXIT_INVALID_MULTIPART;
+            }
+
+            $generator->generateMultipart($decoded, $input->getOption('classname'));
+        } else {
+            if (!($decoded instanceof stdClass)) {
+                $output->writeln('Input JSON must be an object (use --multipart for arrays of objects)');
+
+                return self::EXIT_INVALID_JSON;
+            }
+
+            $generator->generate($decoded, $input->getOption('classname'));
+        }
 
         $namespaceResolver = new NamespaceFolderResolver($this->getComposerConfig());
 

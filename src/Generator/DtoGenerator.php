@@ -19,14 +19,31 @@ class DtoGenerator
 
     public function __construct(
         private readonly string $baseNamespace,
-        private readonly bool $nested,
-        private readonly bool $typed,
-        private readonly bool $optional,
+        private readonly bool   $nested,
+        private readonly bool   $typed,
+        private readonly bool   $optional,
+        private readonly bool   $multipart = false,
     ) {}
 
+    /**
+     * Генерирует DTO из одного объекта.
+     */
     public function generate(stdClass $source, ?string $name): void
     {
         $this->createClass($this->baseNamespace, $source, $name);
+    }
+
+    /**
+     * Генерирует DTO из массива объектов (multipart-режим).
+     * Объединяет все поля из всех объектов в один DTO.
+     * Поля, присутствующие не во всех объектах, становятся optional.
+     *
+     * @param stdClass[] $sources
+     */
+    public function generateMultipart(array $sources, ?string $name): void
+    {
+        $merged = $this->mergeObjects($sources);
+        $this->createClassFromMerged($this->baseNamespace, $merged, $name);
     }
 
     public function getFiles(NamespaceFolderResolver $namespaceResolver): array
@@ -45,10 +62,341 @@ class DtoGenerator
         return $files;
     }
 
-    public function createClass(
+    /**
+     * Объединяет массив stdClass-объектов в единую структуру с мета-информацией.
+     *
+     * Возвращает массив вида:
+     * [
+     *   'propertyName' => [
+     *     'values'    => [mixed, ...],   // все встречающиеся значения (не null)
+     *     'total'     => int,            // сколько объектов во входном массиве
+     *     'present'   => int,            // в скольких объектах присутствует этот ключ
+     *     'nullable'  => bool,           // встречались ли null-значения
+     *   ],
+     *   ...
+     * ]
+     *
+     * @param stdClass[] $sources
+     * @return array<string, array{values: list<mixed>, total: int, present: int, nullable: bool}>
+     */
+    private function mergeObjects(array $sources): array
+    {
+        $total = count($sources);
+        $merged = [];
+
+        foreach ($sources as $source) {
+            $vars = get_object_vars($source);
+            foreach ($vars as $key => $value) {
+                if (!isset($merged[$key])) {
+                    $merged[$key] = [
+                        'values'   => [],
+                        'total'    => $total,
+                        'present'  => 0,
+                        'nullable' => false,
+                    ];
+                }
+                $merged[$key]['present']++;
+                if ($value === null) {
+                    $merged[$key]['nullable'] = true;
+                } else {
+                    $merged[$key]['values'][] = $value;
+                }
+            }
+        }
+
+        return $merged;
+    }
+
+    /**
+     * Создаёт класс DTO из объединённой мета-структуры (multipart).
+     *
+     * @param array<string, array{values: list<mixed>, total: int, present: int, nullable: bool}> $merged
+     */
+    private function createClassFromMerged(
         string $namespace,
-        stdClass $source,
+        array  $merged,
         ?string $name,
+    ): PhpNamespace {
+        $extends = Data::class;
+
+        $classNamespace = new PhpNamespace($namespace);
+        $classNamespace->addUse($extends);
+
+        $class = $classNamespace->addClass(str_replace(' ', '', $name ?? 'JsonDataTransferObject'));
+        $class->addExtend($extends);
+
+        $constructor = $class->addMethod('__construct');
+
+        foreach ($merged as $key => $meta) {
+            $this->addMergedConstructorProperty(
+                $classNamespace,
+                $class,
+                $constructor,
+                $key,
+                $meta,
+            );
+        }
+
+        $this->classes[] = $classNamespace;
+
+        return $classNamespace;
+    }
+
+    /**
+     * Добавляет свойство в конструктор DTO из объединённой мета-информации.
+     *
+     * @param array{values: list<mixed>, total: int, present: int, nullable: bool} $meta
+     */
+    private function addMergedConstructorProperty(
+        PhpNamespace $namespace,
+        ClassType    $class,
+        Method       $constructor,
+        string       $key,
+        array        $meta,
+    ): void {
+        $normalizedKey = $this->normalizePropertyName($key);
+        if ($normalizedKey === null) {
+            return;
+        }
+
+        $shouldMap = $this->needsMapping($key, $normalizedKey);
+
+        // Поле optional, если присутствует не во всех объектах, или есть null, или глобальный optional
+        $isOptional = $this->optional || $meta['present'] < $meta['total'] || $meta['nullable'];
+
+        // Определяем тип по всем не-null значениям
+        $resolvedType = $this->resolveTypeFromMultipleValues($meta['values']);
+
+        // Обработка массивов
+        if ($resolvedType === 'array') {
+            $result = $this->addMergedCollectionProperty(
+                $namespace, $class, $constructor, $key, $normalizedKey,
+                $meta['values'], $shouldMap, $isOptional,
+            );
+            if ($result) {
+                return;
+            }
+            $resolvedType = null;
+        }
+
+        // Обработка вложенных объектов
+        if ($resolvedType === 'object') {
+            if ($this->nested && NameValidator::validateClassName($normalizedKey)) {
+                // Собираем все объекты для этого поля и делаем multipart-merge вложенного DTO
+                $nestedObjects = array_filter($meta['values'], fn($v) => $v instanceof stdClass);
+                if (count($nestedObjects) > 1) {
+                    $dto = $this->addNestedDTOFromMultiple($namespace, $normalizedKey, $nestedObjects);
+                } else {
+                    $dto = $this->addNestedDTO($namespace, $normalizedKey, reset($nestedObjects));
+                }
+                $resolvedType = $this->getDtoFqcn($dto);
+            } else {
+                $resolvedType = null;
+            }
+        }
+
+        $param = $constructor->addPromotedParameter($normalizedKey);
+        $param->setVisibility('public');
+
+        if ($shouldMap) {
+            $this->addMappingAttributes($namespace, $param, $key);
+        }
+
+        $phpType = $this->resolvePhpType($resolvedType);
+        $docType = $resolvedType ?? 'mixed';
+
+        if ($this->typed) {
+            $param->setType($phpType);
+
+            if ($isOptional) {
+                $param->setNullable(true);
+                $param->setDefaultValue(null);
+            }
+        }
+
+        if ($phpType === 'mixed') {
+            $this->addValidationAttributesForMixed($namespace, $param, $meta['values'][0] ?? null, $isOptional);
+        }
+
+        // Строковые форматы — берём первое строковое значение как образец
+        if ($resolvedType === 'string') {
+            $sampleString = null;
+            foreach ($meta['values'] as $v) {
+                if (is_string($v) && $v !== '') {
+                    $sampleString = $v;
+                    break;
+                }
+            }
+            if ($sampleString !== null) {
+                $this->addStringFormatAttributes($namespace, $param, $sampleString);
+            }
+        }
+
+        if ($isOptional) {
+            $constructor->addComment(sprintf('@param %s|null $%s', $docType, $normalizedKey));
+        } else {
+            $constructor->addComment(sprintf('@param %s $%s', $docType, $normalizedKey));
+        }
+    }
+
+    /**
+     * Обработка массивов в multipart-режиме.
+     */
+    private function addMergedCollectionProperty(
+        PhpNamespace $namespace,
+        ClassType    $class,
+        Method       $constructor,
+        string       $originalKey,
+        string       $normalizedKey,
+        array        $allValues,
+        bool         $shouldMap,
+        bool         $isOptional,
+    ): bool {
+        // Собираем все массивы из значений
+        $allArrays = array_filter($allValues, 'is_array');
+        if (empty($allArrays)) {
+            return false;
+        }
+
+        // Собираем все элементы из всех массивов
+        $allElements = [];
+        foreach ($allArrays as $arr) {
+            foreach ($arr as $elem) {
+                $allElements[] = $elem;
+            }
+        }
+
+        $types = collect($allElements)->map($this->getType(...));
+        $uniqueTypes = $types->unique()->filter();
+
+        if ($uniqueTypes->isEmpty() || $uniqueTypes->count() > 1 || $uniqueTypes->first() === 'array') {
+            return false;
+        }
+
+        $type = $uniqueTypes->first();
+
+        // Скалярные массивы
+        if ($type !== 'object') {
+            $param = $constructor->addPromotedParameter($normalizedKey);
+            $param->setVisibility('public');
+
+            if ($shouldMap) {
+                $this->addMappingAttributes($namespace, $param, $originalKey);
+            }
+
+            if ($this->typed) {
+                $param->setType('array');
+                $param->setNullable(true);
+
+                if ($isOptional) {
+                    $param->setDefaultValue(null);
+                }
+            }
+
+            $constructor->addComment(sprintf('@param %s[]|null $%s', $type, $normalizedKey));
+
+            return true;
+        }
+
+        // Вложенные DTO-коллекции
+        if (!$this->nested) {
+            return false;
+        }
+
+        if (!NameValidator::validateClassName($normalizedKey)) {
+            return false;
+        }
+
+        // Проверяем консистентность структуры всех объектов из всех массивов
+        $objectElements = array_filter($allElements, fn($v) => $v instanceof stdClass);
+        if (empty($objectElements)) {
+            return false;
+        }
+
+        // Для multipart — объединяем все объекты из всех массивов
+        if (count($objectElements) > 1) {
+            $dto = $this->addNestedDTOFromMultiple($namespace, $normalizedKey, $objectElements);
+        } else {
+            if (!$this->membersHaveConsistentStructure($objectElements)) {
+                return false;
+            }
+            $dto = $this->addNestedDTO($namespace, $normalizedKey, reset($objectElements));
+        }
+
+        $dtoFqcn = $this->getDtoFqcn($dto);
+
+        $param = $constructor->addPromotedParameter($normalizedKey);
+        $param->setVisibility('public');
+
+        if ($shouldMap) {
+            $this->addMappingAttributes($namespace, $param, $originalKey);
+        }
+
+        if ($this->typed) {
+            $param->setType('array');
+            $param->setNullable(true);
+
+            if ($isOptional) {
+                $param->setDefaultValue(null);
+            }
+        }
+
+        $namespace->addUse('Spatie\\LaravelData\\Attributes\\DataCollectionOf');
+        $param->addAttribute('Spatie\\LaravelData\\Attributes\\DataCollectionOf', [$dtoFqcn]);
+
+        $constructor->addComment(sprintf('@param %s[]|null $%s', $dtoFqcn, $normalizedKey));
+
+        return true;
+    }
+
+    /**
+     * Определяет единый тип из массива значений.
+     * Если все значения одного типа — возвращает этот тип.
+     * Если типы разные — null (mixed).
+     * Если значений нет — null.
+     */
+    private function resolveTypeFromMultipleValues(array $values): ?string
+    {
+        if (empty($values)) {
+            return null;
+        }
+
+        $types = collect($values)->map($this->getType(...))->filter()->unique();
+
+        if ($types->count() === 1) {
+            return $types->first();
+        }
+
+        // int и float — совместимы, приводим к float
+        if ($types->count() === 2 && $types->contains('int') && $types->contains('float')) {
+            return 'float';
+        }
+
+        return null;
+    }
+
+    /**
+     * Создаёт вложенный DTO из нескольких объектов (multipart-merge).
+     *
+     * @param stdClass[] $objects
+     */
+    public function addNestedDTOFromMultiple(PhpNamespace $namespace, string $name, array $objects): ClassType
+    {
+        $merged = $this->mergeObjects($objects);
+        $generatedDtoNamespace = $this->createClassFromMerged($this->baseNamespace, $merged, Str::studly($name));
+        $generatedDto = array_values($generatedDtoNamespace->getClasses())[0];
+
+        if ($namespace->getName() !== $generatedDtoNamespace->getName()) {
+            $namespace->addUse($generatedDtoNamespace->getName() . '\\' . $generatedDto->getName());
+        }
+
+        return $generatedDto;
+    }
+
+    public function createClass(
+        string   $namespace,
+        stdClass $source,
+        ?string  $name,
     ): PhpNamespace {
         $extends = Data::class;
 
@@ -71,27 +419,11 @@ class DtoGenerator
 
     /**
      * Нормализует ключ JSON в валидное имя PHP-переменной в camelCase.
-     *
-     * Убирает все символы, невалидные для PHP-переменных,
-     * затем приводит результат к camelCase.
-     *
-     * Примеры:
-     *   "@Name"       -> "name"
-     *   "@HowToReach" -> "howToReach"
-     *   "some-key"    -> "someKey"
-     *   "some_key"    -> "someKey"
-     *   "WorkPeriod"  -> "workPeriod"
-     *   "123bad"      -> "bad" (цифры в начале убираются)
      */
     private function normalizePropertyName(string $key): ?string
     {
-        // Убираем все символы, невалидные для PHP-переменной (оставляем буквы, цифры, _, пробелы и дефисы для разбиения)
         $cleaned = preg_replace('/[^a-zA-Z0-9_\s\-]/', ' ', $key);
-
-        // Приводим к camelCase через Str::camel (он обрабатывает пробелы, дефисы, подчёркивания)
         $camel = Str::camel(trim($cleaned));
-
-        // Убираем цифры в начале (невалидно для PHP)
         $camel = ltrim($camel, '0123456789');
 
         if ($camel === '') {
@@ -102,7 +434,7 @@ class DtoGenerator
     }
 
     /**
-     * Проверяет, нужно ли маппить ключ (оригинальный ключ отличается от нормализованного).
+     * Проверяет, нужно ли маппить ключ.
      */
     private function needsMapping(string $originalKey, string $normalizedKey): bool
     {
@@ -111,18 +443,16 @@ class DtoGenerator
 
     private function addConstructorProperty(
         PhpNamespace $namespace,
-        ClassType $class,
-        Method $constructor,
-        string $key,
-        mixed $value,
+        ClassType    $class,
+        Method       $constructor,
+        string       $key,
+        mixed        $value,
     ): void {
         $type = $this->getType($value);
 
-        // Нормализуем имя свойства
         $normalizedKey = $this->normalizePropertyName($key);
 
         if ($normalizedKey === null) {
-            // Невозможно создать валидное имя переменной
             return;
         }
 
@@ -135,7 +465,6 @@ class DtoGenerator
                 return;
             }
 
-            // Не удалось определить тип элементов — mixed
             $type = null;
         }
 
@@ -150,7 +479,6 @@ class DtoGenerator
         $param = $constructor->addPromotedParameter($normalizedKey);
         $param->setVisibility('public');
 
-        // Добавляем MapInputName/MapOutputName если оригинальный ключ отличается
         if ($shouldMap) {
             $this->addMappingAttributes($namespace, $param, $key);
         }
@@ -167,19 +495,14 @@ class DtoGenerator
             }
         }
 
-        // Для примитивов PHP сам валидирует через type hints — атрибуты не нужны.
-        // Атрибуты добавляем только там, где PHP type hint недостаточен.
         if ($phpType === 'mixed') {
             $this->addValidationAttributesForMixed($namespace, $param, $value);
         }
 
-        // Добавляем строковые валидации (email, url, uuid и т.д.) как атрибуты,
-        // потому что PHP type hint string не покрывает формат.
         if ($type === 'string') {
             $this->addStringFormatAttributes($namespace, $param, $value);
         }
 
-        // PHPDoc всегда пишем для IDE
         if ($this->optional) {
             $constructor->addComment(sprintf('@param %s|null $%s', $docType, $normalizedKey));
         } else {
@@ -189,12 +512,12 @@ class DtoGenerator
 
     public function addCollectionConstructorProperty(
         PhpNamespace $namespace,
-        ClassType $class,
-        Method $constructor,
-        string $originalKey,
-        string $normalizedKey,
-        array $values,
-        bool $shouldMap,
+        ClassType    $class,
+        Method       $constructor,
+        string       $originalKey,
+        string       $normalizedKey,
+        array        $values,
+        bool         $shouldMap,
     ): bool {
         $types = collect($values)->map($this->getType(...));
 
@@ -206,7 +529,6 @@ class DtoGenerator
 
         $type = $uniqueTypes->first();
 
-        // Скалярные массивы
         if ($type !== 'object') {
             $param = $constructor->addPromotedParameter($normalizedKey);
             $param->setVisibility('public');
@@ -224,13 +546,11 @@ class DtoGenerator
                 }
             }
 
-            // PHPDoc для IDE — указываем тип элементов
             $constructor->addComment(sprintf('@param %s[]|null $%s', $type, $normalizedKey));
 
             return true;
         }
 
-        // Вложенные DTO
         if (!$this->nested) {
             return false;
         }
@@ -262,7 +582,6 @@ class DtoGenerator
             }
         }
 
-        // DataCollectionOf нужен, потому что PHP не может типизировать "массив конкретных DTO"
         $namespace->addUse('Spatie\\LaravelData\\Attributes\\DataCollectionOf');
         $param->addAttribute('Spatie\\LaravelData\\Attributes\\DataCollectionOf', [$dtoFqcn]);
 
@@ -307,8 +626,6 @@ class DtoGenerator
 
     /**
      * Преобразует внутренний тип в PHP type hint.
-     * Примитивы (string, int, float, bool) и конкретные классы — напрямую.
-     * Всё остальное — mixed.
      */
     private function resolvePhpType(?string $type): string
     {
@@ -316,12 +633,10 @@ class DtoGenerator
             return 'mixed';
         }
 
-        // Примитивы PHP поддерживает нативно
         if (in_array($type, ['string', 'int', 'float', 'bool', 'array'], true)) {
             return $type;
         }
 
-        // FQCN вложенного DTO
         if (str_starts_with($type, '\\')) {
             return $type;
         }
@@ -330,13 +645,12 @@ class DtoGenerator
     }
 
     /**
-     * Добавляет атрибуты MapInputName и MapOutputName для маппинга
-     * оригинального ключа JSON на нормализованное имя PHP-свойства.
+     * Добавляет атрибуты MapInputName и MapOutputName.
      */
     private function addMappingAttributes(
-        PhpNamespace $namespace,
+        PhpNamespace     $namespace,
         PromotedParameter $param,
-        string $originalKey,
+        string           $originalKey,
     ): void {
         $mapInputClass = 'Spatie\\LaravelData\\Attributes\\MapInputName';
         $mapOutputClass = 'Spatie\\LaravelData\\Attributes\\MapOutputName';
@@ -349,17 +663,19 @@ class DtoGenerator
     }
 
     /**
-     * Добавляет атрибуты валидации только для mixed-типов,
-     * где PHP type hint не может помочь.
+     * Добавляет атрибуты валидации для mixed-типов.
+     * Перегрузка с поддержкой явного isOptional для multipart.
      */
     private function addValidationAttributesForMixed(
-        PhpNamespace $namespace,
+        PhpNamespace     $namespace,
         PromotedParameter $param,
-        mixed $value,
+        mixed            $value,
+        ?bool            $isOptional = null,
     ): void {
         $validationNs = 'Spatie\\LaravelData\\Attributes\\Validation';
+        $effectiveOptional = $isOptional ?? $this->optional;
 
-        if ($value === null || $this->optional) {
+        if ($value === null || $effectiveOptional) {
             $this->addAttribute($namespace, $param, $validationNs . '\\Nullable');
         } else {
             $this->addAttribute($namespace, $param, $validationNs . '\\Required');
@@ -367,13 +683,12 @@ class DtoGenerator
     }
 
     /**
-     * Для строк определяем формат по значению и добавляем соответствующий атрибут.
-     * PHP type hint `string` не покрывает формат (email, url, uuid и т.д.).
+     * Для строк определяем формат по значению.
      */
     private function addStringFormatAttributes(
-        PhpNamespace $namespace,
+        PhpNamespace     $namespace,
         PromotedParameter $param,
-        mixed $value,
+        mixed            $value,
     ): void {
         if (!is_string($value) || $value === '') {
             return;
@@ -381,37 +696,31 @@ class DtoGenerator
 
         $validationNs = 'Spatie\\LaravelData\\Attributes\\Validation';
 
-        // Email
         if (filter_var($value, FILTER_VALIDATE_EMAIL) !== false) {
             $this->addAttribute($namespace, $param, $validationNs . '\\Email');
             return;
         }
 
-        // URL
         if (filter_var($value, FILTER_VALIDATE_URL) !== false) {
             $this->addAttribute($namespace, $param, $validationNs . '\\Url');
             return;
         }
 
-        // UUID
         if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $value)) {
             $this->addAttribute($namespace, $param, $validationNs . '\\Uuid');
             return;
         }
 
-        // ISO 8601 datetime
         if (preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/', $value) && strtotime($value) !== false) {
             $this->addAttribute($namespace, $param, $validationNs . '\\DateFormat', ['Y-m-d\\TH:i:sP']);
             return;
         }
 
-        // ISO date (без времени)
         if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) && strtotime($value) !== false) {
             $this->addAttribute($namespace, $param, $validationNs . '\\DateFormat', ['Y-m-d']);
             return;
         }
 
-        // IP address
         if (filter_var($value, FILTER_VALIDATE_IP) !== false) {
             $this->addAttribute($namespace, $param, $validationNs . '\\IP');
             return;
@@ -419,10 +728,10 @@ class DtoGenerator
     }
 
     private function addAttribute(
-        PhpNamespace $namespace,
+        PhpNamespace     $namespace,
         PromotedParameter $param,
-        string $attributeClass,
-        array $arguments = [],
+        string           $attributeClass,
+        array            $arguments = [],
     ): void {
         $namespace->addUse($attributeClass);
         $param->addAttribute($attributeClass, $arguments);
