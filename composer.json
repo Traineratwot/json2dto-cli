@@ -1,7 +1,7 @@
 {
     "name": "traineratwot/json2dto",
     "license": "GPL-3.0",
-    "version" : "1.3.2",
+    "version" : "1.3.3",
     "description": "Convert JSON files to Spatie DTO objects",
     "keywords": ["spatie", "laravel", "dto", "converter", "json"],
     "homepage": "https://github.com/traineratwot/json2dto",

@@ -138,7 +138,6 @@ class DtoGeneratorTest extends TestCase
         ]), 'TestDTO');
 
         $files = $generator->getFiles(new NamespaceFolderResolver());
-
         $this->assertCount(1, $files);
         $this->assertMatchesJsonSnapshot($files);
     }

@@ -120,7 +120,7 @@ class DtoGenerator
         $extends = Data::class;
 
         $classNamespace = new PhpNamespace($namespace);
-        $classNamespace->addUse($extends);
+        $classNamespace->addUse($extends, 'SpatieLaravelDataObj');
 
         $class = $classNamespace->addClass(str_replace(' ', '', $name ?? 'JsonDataTransferObject'));
         $class->addExtend($extends);
@@ -401,7 +401,7 @@ class DtoGenerator
         $extends = Data::class;
 
         $classNamespace = new PhpNamespace($namespace);
-        $classNamespace->addUse($extends);
+        $classNamespace->addUse($extends, 'SpatieLaravelDataObj');
 
         $class = $classNamespace->addClass(str_replace(' ', '', $name ?? 'JsonDataTransferObject'));
         $class->addExtend($extends);
