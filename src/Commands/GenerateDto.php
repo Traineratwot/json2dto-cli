@@ -24,9 +24,9 @@ class GenerateDto extends Command
     protected function configure()
     {
         $this->setName('generate')
-            ->setDescription('Generate DTO from a json string')
+            ->setDescription('Generate DTO from a json string or jsonL file')
             ->addArgument('namespace', InputArgument::REQUIRED, 'Namespace to generate the class(es) in')
-            ->addArgument('json', InputArgument::OPTIONAL, 'File containing the json string')
+            ->addArgument('json', InputArgument::OPTIONAL, 'File containing the json string or jsonL data')
             ->addOption('classname', 'name', InputOption::VALUE_OPTIONAL, 'Class name of the new DTO', 'NewDto')
             ->addOption('nested', null, InputOption::VALUE_NONE, 'Generate nested DTOs')
             ->addOption('typed', null, InputOption::VALUE_NONE, 'Generate PHP >= 7.4 strict typing')
@@ -39,15 +39,30 @@ class GenerateDto extends Command
     {
         $decoded = null;
         $inputPath = $input->getArgument('json');
+        $isMultipart = $input->getOption('multipart') !== false;
 
         if ($inputPath && file_exists($inputPath)) {
-            $decoded = json_decode(file_get_contents($inputPath));
+            $content = file_get_contents($inputPath);
+
+            // Проверяем, является ли это jsonL файлом
+            if ($this->isJsonL($content)) {
+                $decoded = $this->parseJsonL($content);
+                $isMultipart = true;
+            } else {
+                $decoded = json_decode($content);
+            }
         }
 
         if (!$decoded) {
             stream_set_blocking(STDIN, false);
             $stdIn = file_get_contents('php://stdin');
-            $decoded = json_decode($stdIn);
+
+            if ($this->isJsonL($stdIn)) {
+                $decoded = $this->parseJsonL($stdIn);
+                $isMultipart = true;
+            } else {
+                $decoded = json_decode($stdIn);
+            }
         }
 
         if (!$decoded) {
@@ -62,7 +77,6 @@ class GenerateDto extends Command
             return self::EXIT_INVALID_NAMESPACE;
         }
 
-        $isMultipart = $input->getOption('multipart') !== false;
         $dryRun = $input->getOption('dry') !== false;
 
         $generator = new DtoGenerator(
@@ -130,6 +144,61 @@ class GenerateDto extends Command
         }
 
         return self::EXIT_SUCCESS;
+    }
+
+    /**
+     * Проверяет, является ли содержимое jsonL (JSON Lines).
+     */
+    private function isJsonL(string $content): bool
+    {
+        $content = trim($content);
+        if (empty($content)) {
+            return false;
+        }
+
+        $lines = explode("\n", $content);
+        $validLines = 0;
+
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (empty($line)) {
+                continue;
+            }
+
+            $decoded = json_decode($line);
+            if ($decoded instanceof stdClass) {
+                $validLines++;
+            } else {
+                return false;
+            }
+        }
+
+        return $validLines > 0;
+    }
+
+    /**
+     * Парсит jsonL (JSON Lines) формат и возвращает массив объектов.
+     *
+     * @return stdClass[]
+     */
+    private function parseJsonL(string $content): array
+    {
+        $objects = [];
+        $lines = explode("\n", $content);
+
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (empty($line)) {
+                continue;
+            }
+
+            $decoded = json_decode($line);
+            if ($decoded instanceof stdClass) {
+                $objects[] = $decoded;
+            }
+        }
+
+        return $objects;
     }
 
     private function getComposerConfig(): ?array
