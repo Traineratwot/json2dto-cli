@@ -356,7 +356,8 @@ class DtoGenerator
         $namespace->addUse('Spatie\\LaravelData\\Attributes\\DataCollectionOf');
         $param->addAttribute('Spatie\\LaravelData\\Attributes\\DataCollectionOf', [$dtoFqcn]);
 
-        $constructor->addComment(sprintf('@param %s[]|null $%s', $dtoFqcn, $normalizedKey));
+        $elementClassName = class_basename($dtoFqcn);
+        $constructor->addComment(sprintf('@param %s[]|null $%s', $elementClassName, $normalizedKey));
 
         return true;
     }
@@ -581,6 +582,9 @@ class DtoGenerator
                 }
             }
 
+            // Добавляем Spatie атрибут для скалярных массивов
+            $this->addScalarCollectionAttribute($namespace, $param, $type);
+
             $constructor->addComment(sprintf('@param %s[]|null $%s', $type, $normalizedKey));
 
             return true;
@@ -595,7 +599,14 @@ class DtoGenerator
         }
 
         $nestedPathPrefix = $pathPrefix ? $pathPrefix . '.' . $normalizedKey : $normalizedKey;
-        $dto = $this->addNestedDTO($namespace, $nestedPathPrefix, reset($values));
+
+        // Если несколько объектов в массиве, создаём класс элемента через multipart
+        if (count($values) > 1) {
+            $dto = $this->addNestedDTOFromMultiple($namespace, $nestedPathPrefix, $values);
+        } else {
+            $dto = $this->addNestedDTO($namespace, $nestedPathPrefix, reset($values));
+        }
+
         $dtoFqcn = $this->getDtoFqcn($dto);
 
         $param = $constructor->addPromotedParameter($normalizedKey);
@@ -617,7 +628,9 @@ class DtoGenerator
         $namespace->addUse('Spatie\\LaravelData\\Attributes\\DataCollectionOf');
         $param->addAttribute('Spatie\\LaravelData\\Attributes\\DataCollectionOf', [$dtoFqcn]);
 
-        $constructor->addComment(sprintf('@param %s[]|null $%s', $dtoFqcn, $normalizedKey));
+        // Улучшенный PHPDoc с указанием типа элемента массива
+        $elementClassName = class_basename($dtoFqcn);
+        $constructor->addComment(sprintf('@param %s[]|null $%s', $elementClassName, $normalizedKey));
 
         return true;
     }
@@ -694,6 +707,37 @@ class DtoGenerator
 
         $param->addAttribute($mapInputClass, [$originalKey]);
         $param->addAttribute($mapOutputClass, [$originalKey]);
+    }
+
+    /**
+     * Добавляет атрибут для скалярных коллекций.
+     * Например: #[ArrayOf(StringType::class)] для массивов строк
+     */
+    private function addScalarCollectionAttribute(
+        PhpNamespace     $namespace,
+        PromotedParameter $param,
+        string           $scalarType,
+    ): void {
+        // Маппинг типов на Spatie классы
+        $typeMap = [
+            'string' => 'Spatie\\LaravelData\\Attributes\\Validation\\StringType',
+            'int' => 'Spatie\\LaravelData\\Attributes\\Validation\\IntegerType',
+            'float' => 'Spatie\\LaravelData\\Attributes\\Validation\\NumericType',
+            'bool' => 'Spatie\\LaravelData\\Attributes\\Validation\\BooleanType',
+        ];
+
+        if (!isset($typeMap[$scalarType])) {
+            return;
+        }
+
+        $typeClass = $typeMap[$scalarType];
+        $namespace->addUse('Spatie\\LaravelData\\Attributes\\Validation\\ArrayType');
+        $namespace->addUse($typeClass);
+
+        // Добавляем атрибут #[ArrayType(StringType::class)]
+        $param->addAttribute('Spatie\\LaravelData\\Attributes\\Validation\\ArrayType', [
+            class_basename($typeClass) . '::class'
+        ]);
     }
 
     /**
