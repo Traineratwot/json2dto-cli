@@ -18,7 +18,7 @@ class DtoGenerator
     private array $classes = [];
 
     private int $nestingLevel = 0;
-    private const MAX_NESTING_DEPTH = 500;
+    private const MAX_NESTING_DEPTH = 50;
 
     public function __construct(
         private readonly string $baseNamespace,
@@ -34,7 +34,7 @@ class DtoGenerator
     public function generate(stdClass $source, ?string $name): void
     {
         $this->nestingLevel = 0;
-        $this->createClass($this->baseNamespace, $source, $name);
+        $this->createClass($this->baseNamespace, $source, $name, '');
     }
 
     /**
@@ -48,7 +48,7 @@ class DtoGenerator
     {
         $this->nestingLevel = 0;
         $merged = $this->mergeObjects($sources);
-        $this->createClassFromMerged($this->baseNamespace, $merged, $name);
+        $this->createClassFromMerged($this->baseNamespace, $merged, $name, '');
     }
 
     public function getFiles(NamespaceFolderResolver $namespaceResolver): array
@@ -121,6 +121,7 @@ class DtoGenerator
         string $namespace,
         array  $merged,
         ?string $name,
+        string $pathPrefix,
     ): PhpNamespace {
         $extends = Data::class;
 
@@ -139,6 +140,7 @@ class DtoGenerator
                 $constructor,
                 $key,
                 $meta,
+                $pathPrefix,
             );
         }
 
@@ -158,6 +160,7 @@ class DtoGenerator
         Method       $constructor,
         string       $key,
         array        $meta,
+        string       $pathPrefix,
     ): void {
         $normalizedKey = $this->normalizePropertyName($key);
         if ($normalizedKey === null) {
@@ -176,7 +179,7 @@ class DtoGenerator
         if ($resolvedType === 'array') {
             $result = $this->addMergedCollectionProperty(
                 $namespace, $class, $constructor, $key, $normalizedKey,
-                $meta['values'], $shouldMap, $isOptional,
+                $meta['values'], $shouldMap, $isOptional, $pathPrefix,
             );
             if ($result) {
                 return;
@@ -186,15 +189,20 @@ class DtoGenerator
 
         // Обработка вложенных объектов
         if ($resolvedType === 'object') {
-            if ($this->nested && $this->nestingLevel < self::MAX_NESTING_DEPTH && NameValidator::validateClassName($normalizedKey)) {
+            if ($this->nestingLevel < self::MAX_NESTING_DEPTH) {
                 // Собираем все объекты для этого поля и делаем multipart-merge вложенного DTO
                 $nestedObjects = array_filter($meta['values'], fn($v) => $v instanceof stdClass);
-                if (count($nestedObjects) > 1) {
-                    $dto = $this->addNestedDTOFromMultiple($namespace, $normalizedKey, $nestedObjects);
+                if (count($nestedObjects) > 0) {
+                    $nestedPathPrefix = $pathPrefix ? $pathPrefix . '.' . $normalizedKey : $normalizedKey;
+                    if (count($nestedObjects) > 1) {
+                        $dto = $this->addNestedDTOFromMultiple($namespace, $nestedPathPrefix, $nestedObjects);
+                    } else {
+                        $dto = $this->addNestedDTO($namespace, $nestedPathPrefix, reset($nestedObjects));
+                    }
+                    $resolvedType = $this->getDtoFqcn($dto);
                 } else {
-                    $dto = $this->addNestedDTO($namespace, $normalizedKey, reset($nestedObjects));
+                    $resolvedType = null;
                 }
-                $resolvedType = $this->getDtoFqcn($dto);
             } else {
                 $resolvedType = null;
             }
@@ -256,6 +264,7 @@ class DtoGenerator
         array        $allValues,
         bool         $shouldMap,
         bool         $isOptional,
+        string       $pathPrefix,
     ): bool {
         // Собираем все массивы из значений
         $allArrays = array_filter($allValues, 'is_array');
@@ -304,11 +313,7 @@ class DtoGenerator
         }
 
         // Вложенные DTO-коллекции
-        if (!$this->nested || $this->nestingLevel >= self::MAX_NESTING_DEPTH) {
-            return false;
-        }
-
-        if (!NameValidator::validateClassName($normalizedKey)) {
+        if ($this->nestingLevel >= self::MAX_NESTING_DEPTH) {
             return false;
         }
 
@@ -318,14 +323,16 @@ class DtoGenerator
             return false;
         }
 
+        $nestedPathPrefix = $pathPrefix ? $pathPrefix . '.' . $normalizedKey : $normalizedKey;
+
         // Для multipart — объединяем все объекты из всех массивов
         if (count($objectElements) > 1) {
-            $dto = $this->addNestedDTOFromMultiple($namespace, $normalizedKey, $objectElements);
+            $dto = $this->addNestedDTOFromMultiple($namespace, $nestedPathPrefix, $objectElements);
         } else {
             if (!$this->membersHaveConsistentStructure($objectElements)) {
                 return false;
             }
-            $dto = $this->addNestedDTO($namespace, $normalizedKey, reset($objectElements));
+            $dto = $this->addNestedDTO($namespace, $nestedPathPrefix, reset($objectElements));
         }
 
         $dtoFqcn = $this->getDtoFqcn($dto);
@@ -385,11 +392,11 @@ class DtoGenerator
      *
      * @param stdClass[] $objects
      */
-    public function addNestedDTOFromMultiple(PhpNamespace $namespace, string $name, array $objects): ClassType
+    public function addNestedDTOFromMultiple(PhpNamespace $namespace, string $pathPrefix, array $objects): ClassType
     {
         $this->nestingLevel++;
         $merged = $this->mergeObjects($objects);
-        $generatedDtoNamespace = $this->createClassFromMerged($this->baseNamespace, $merged, Str::studly($name));
+        $generatedDtoNamespace = $this->createClassFromMerged($this->baseNamespace, $merged, $this->buildClassName($pathPrefix), $pathPrefix);
         $generatedDto = array_values($generatedDtoNamespace->getClasses())[0];
         $this->nestingLevel--;
 
@@ -404,24 +411,42 @@ class DtoGenerator
         string   $namespace,
         stdClass $source,
         ?string  $name,
+        string   $pathPrefix,
     ): PhpNamespace {
         $extends = Data::class;
 
         $classNamespace = new PhpNamespace($namespace);
         $classNamespace->addUse($extends, 'SpatieLaravelDataObj');
 
-        $class = $classNamespace->addClass(str_replace(' ', '', $name ?? 'JsonDataTransferObject'));
+        $className = $name ?? $this->buildClassName($pathPrefix);
+        $class = $classNamespace->addClass(str_replace(' ', '', $className));
         $class->addExtend($extends);
 
         $constructor = $class->addMethod('__construct');
 
         foreach ($source as $key => $value) {
-            $this->addConstructorProperty($classNamespace, $class, $constructor, $key, $value);
+            $this->addConstructorProperty($classNamespace, $class, $constructor, $key, $value, $pathPrefix);
         }
 
         $this->classes[] = $classNamespace;
 
         return $classNamespace;
+    }
+
+    /**
+     * Строит имя класса из пути в CamelCase.
+     * Например: "hotelImageList.image" → "HotelImageListImage"
+     */
+    private function buildClassName(string $pathPrefix): string
+    {
+        if (empty($pathPrefix)) {
+            return 'JsonDataTransferObject';
+        }
+
+        $parts = explode('.', $pathPrefix);
+        $className = implode('', array_map(fn($part) => Str::studly($part), $parts));
+
+        return $className ?: 'JsonDataTransferObject';
     }
 
     /**
@@ -454,6 +479,7 @@ class DtoGenerator
         Method       $constructor,
         string       $key,
         mixed        $value,
+        string       $pathPrefix,
     ): void {
         $type = $this->getType($value);
 
@@ -466,7 +492,7 @@ class DtoGenerator
         $shouldMap = $this->needsMapping($key, $normalizedKey);
 
         if ($type === 'array') {
-            $result = $this->addCollectionConstructorProperty($namespace, $class, $constructor, $key, $normalizedKey, $value, $shouldMap);
+            $result = $this->addCollectionConstructorProperty($namespace, $class, $constructor, $key, $normalizedKey, $value, $shouldMap, $pathPrefix);
 
             if ($result) {
                 return;
@@ -477,8 +503,9 @@ class DtoGenerator
 
         if ($type === 'object') {
             $type = null;
-            if ($this->nested && $this->nestingLevel < self::MAX_NESTING_DEPTH && NameValidator::validateClassName($normalizedKey)) {
-                $dto = $this->addNestedDTO($namespace, $normalizedKey, $value);
+            if ($this->nestingLevel < self::MAX_NESTING_DEPTH) {
+                $nestedPathPrefix = $pathPrefix ? $pathPrefix . '.' . $normalizedKey : $normalizedKey;
+                $dto = $this->addNestedDTO($namespace, $nestedPathPrefix, $value);
                 $type = $this->getDtoFqcn($dto);
             }
         }
@@ -525,6 +552,7 @@ class DtoGenerator
         string       $normalizedKey,
         array        $values,
         bool         $shouldMap,
+        string       $pathPrefix,
     ): bool {
         $types = collect($values)->map($this->getType(...));
 
@@ -558,7 +586,7 @@ class DtoGenerator
             return true;
         }
 
-        if (!$this->nested || $this->nestingLevel >= self::MAX_NESTING_DEPTH) {
+        if ($this->nestingLevel >= self::MAX_NESTING_DEPTH) {
             return false;
         }
 
@@ -566,11 +594,8 @@ class DtoGenerator
             return false;
         }
 
-        if (!NameValidator::validateClassName($normalizedKey)) {
-            return false;
-        }
-
-        $dto = $this->addNestedDTO($namespace, $normalizedKey, reset($values));
+        $nestedPathPrefix = $pathPrefix ? $pathPrefix . '.' . $normalizedKey : $normalizedKey;
+        $dto = $this->addNestedDTO($namespace, $nestedPathPrefix, reset($values));
         $dtoFqcn = $this->getDtoFqcn($dto);
 
         $param = $constructor->addPromotedParameter($normalizedKey);
@@ -597,10 +622,10 @@ class DtoGenerator
         return true;
     }
 
-    public function addNestedDTO(PhpNamespace $namespace, string $name, stdClass $object): ClassType
+    public function addNestedDTO(PhpNamespace $namespace, string $pathPrefix, stdClass $object): ClassType
     {
         $this->nestingLevel++;
-        $generatedDtoNamespace = $this->createClass($this->baseNamespace, $object, Str::studly($name));
+        $generatedDtoNamespace = $this->createClass($this->baseNamespace, $object, $this->buildClassName($pathPrefix), $pathPrefix);
         $generatedDto = array_values($generatedDtoNamespace->getClasses())[0];
         $this->nestingLevel--;
 

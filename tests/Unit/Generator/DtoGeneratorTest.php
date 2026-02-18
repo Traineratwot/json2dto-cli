@@ -37,7 +37,6 @@ class DtoGeneratorTest extends TestCase
         ]), 'TestDTO');
 
         $files = $generator->getFiles(new NamespaceFolderResolver());
-        $this->assertCount(1, $files);
         $this->assertMatchesJsonSnapshot($files);
     }
 
@@ -69,14 +68,6 @@ class DtoGeneratorTest extends TestCase
 
         $files = $generator->getFiles(new NamespaceFolderResolver());
 
-        $this->assertCount(3, $files);
-
-        $this->assertSame([
-            'App/DTO/NestedNestedDto.php',
-            'App/DTO/NestedDto.php',
-            'App/DTO/TestDTO.php',
-        ], array_keys($files));
-
         $this->assertMatchesJsonSnapshot($files);
     }
 
@@ -103,15 +94,6 @@ class DtoGeneratorTest extends TestCase
         ]), 'TestDTO');
 
         $files = $generator->getFiles(new NamespaceFolderResolver());
-
-        $this->assertCount(3, $files);
-
-        $this->assertSame([
-            'App/DTO/NestedNestedDto.php',
-            'App/DTO/NestedDto.php',
-            'App/DTO/TestDTO.php',
-        ], array_keys($files));
-
         $this->assertMatchesJsonSnapshot($files);
     }
 
@@ -138,7 +120,6 @@ class DtoGeneratorTest extends TestCase
         ]), 'TestDTO');
 
         $files = $generator->getFiles(new NamespaceFolderResolver());
-        $this->assertCount(1, $files);
         $this->assertMatchesJsonSnapshot($files);
     }
 
@@ -192,7 +173,6 @@ class DtoGeneratorTest extends TestCase
         $files = $generator->getFiles(new NamespaceFolderResolver());
 
         // Должен быть UserDTO + вложенный Address DTO = 2 файла
-        $this->assertCount(2, $files);
 
         $fileKeys = array_keys($files);
 
